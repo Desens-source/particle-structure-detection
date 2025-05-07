@@ -4,6 +4,6 @@ This repository contains the Python code for detecting and verifying particle st
 
 ## Contents
 
-- `01_Particle_structure_detachment_detection.py` – Modul 1: Detektion von Partikelstrukturen  
-- `02_Checking_the_detected_particle_structure_detachments.py` – Modul 2: Verifikation der detektierten Ereignisse 
+- `01_Particle_structure_detachment_detection.py`   
+- `02_Checking_the_detected_particle_structure_detachments.py`
 - `requirements.txt`  - required Python packages
