@@ -56,120 +56,116 @@ def threshold_particle(roi):
     wird THRESH_BINARY_INV verwendet – so erscheint das schwarze Partikel als weiße Fläche.
     """
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+    ret, thresh = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
     return thresh
 
 
-def compute_difference_probability(thresh_prev, thresh_curr,
-                                   noise_kernel_size=(3, 3),
-                                   noise_iterations=2,
-                                   area_threshold=20):
+def compute_difference_probability(thresh_prev, thresh_curr, noise_kernel_size=(3, 3), noise_iterations=2):
     """
     Erstellt ein Differenzbild aus den binären Threshold-Bildern von previous und current.
-    Anschließend Rauschunterdrückung und Connected-Component-Auswertung:
-    - Wenn eine zusammenhängende Fläche > area_threshold → probability = 1.0
-    - Sonst: Fläche-zu-ROI-Relation (diff_area / roi_area, geclamped auf [0,1]).
+    Es wird eine absolute Differenz berechnet, anschließend erfolgt eine Rauschunterdrückung
+    mittels morphologischer Opening-Operation.
+
+    Die "Differenzfläche" (diff_area) wird als die Anzahl der weißen Pixel im bereinigten
+    Differenzbild ermittelt. Als detachment probability wird der Anteil der diff_area an der
+    Gesamtfläche des ROIs verwendet (clamped auf [0,1]).
     """
-    # 1) Differenzbild
+    # Differenzbild berechnen (absolute Differenz der binären Bilder)
     diff = cv2.absdiff(thresh_prev, thresh_curr)
-    # 2) Morphologisches Opening zur Rauschunterdrückung
+    # Rauschunterdrückung: Morphologisches Opening, um kleine Verschiebungen herauszufiltern
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, noise_kernel_size)
     diff_clean = cv2.morphologyEx(diff, cv2.MORPH_OPEN, kernel, iterations=noise_iterations)
-
-    # 3) Flächenberechnung
     diff_area = cv2.countNonZero(diff_clean)
+    # Gesamtfläche des ROIs
     roi_area = thresh_prev.shape[0] * thresh_prev.shape[1]
-
-    # 4) Connected Components auswerten
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(diff_clean)
-    component_areas = stats[1:, cv2.CC_STAT_AREA]  # Index 0 = Hintergrund
-
-    # 5) Entscheidung basierend auf CC-Größen
-    if component_areas.size > 0 and np.any(component_areas > area_threshold):
-        probability = 1.0
+    if roi_area == 0:
+        probability = 0.0
     else:
-        probability = min(1.0, diff_area / roi_area) if roi_area > 0 else 0.0
-
+        probability = min(1.0, diff_area / roi_area)
     return diff, diff_clean, diff_area, probability
 
 
-def process_particle_folder(folder_path, margin=20,
-                            noise_kernel_size=(3, 3),
-                            noise_iterations=2,
-                            area_threshold=20):
+def process_particle_folder(folder_path, margin=20, noise_kernel_size=(3, 3), noise_iterations=2, area_threshold=20):
     """
     Verarbeitet einen Particle-Unterordner:
-      - Lädt Bilder previous, current, marked
-      - Bestimmt ROI aus marked
-      - Segmentiert Partikel, erstellt Diff-Bilder
-      - Berechnet probability (0 oder 1) via CC-Logik
-      - Speichert Debug-Bilder in Code_Ueberpruefung
+      - Lädt die Bilder "previous", "current" und "marked".
+      - Nutzt das "marked"-Bild, um den interessierenden Bereich (ROI) zu bestimmen.
+      - Schneidet den ROI aus den "previous" und "current" Bildern aus.
+      - Segmentiert in den ROIs das schwarze Partikel mittels THRESH_BINARY_INV.
+      - Erstellt ein Differenzbild aus den beiden binären Bildern.
+      - Unterdrückt Rauschen mittels morphologischer Opening-Operation.
+      - Berechnet die Differenzfläche und daraus die detachment probability.
+      - Speichert alle Debug-Bilder im Unterordner "Code_Ueberpruefung".
     """
-    # Dateipfade suchen
-    previous_img_path = current_img_path = marked_img_path = None
+    # Dateisuche
+    previous_img_path = None
+    current_img_path = None
+    marked_img_path = None
     for file in os.listdir(folder_path):
         fname = file.lower()
-        path = os.path.join(folder_path, file)
-        if 'previous' in fname:
-            previous_img_path = path
-        elif 'current' in fname:
-            current_img_path = path
-        elif 'marked' in fname:
-            marked_img_path = path
-
-    if not (previous_img_path and current_img_path and marked_img_path):
-        print(f"Notwendige Dateien in {folder_path} nicht gefunden.")
+        if "previous" in fname:
+            previous_img_path = os.path.join(folder_path, file)
+        elif "current" in fname:
+            current_img_path = os.path.join(folder_path, file)
+        elif "marked" in fname:
+            marked_img_path = os.path.join(folder_path, file)
+    if previous_img_path is None or current_img_path is None or marked_img_path is None:
+        print("Notwendige Dateien in", folder_path, "nicht gefunden.")
         return None, None, None
 
     prev = cv2.imread(previous_img_path)
     curr = cv2.imread(current_img_path)
     marked = cv2.imread(marked_img_path)
     if prev is None or curr is None or marked is None:
-        print(f"Fehler beim Laden der Bilder in {folder_path}")
+        print("Fehler beim Laden der Bilder in", folder_path)
         return None, None, None
 
-    # Debug-Ordner anlegen
-    debug_folder = os.path.join(folder_path, 'Code_Ueberpruefung')
+    # Debug-Ordner anlegen (ohne Umlaute)
+    debug_folder = os.path.join(folder_path, "Code_Ueberpruefung")
     os.makedirs(debug_folder, exist_ok=True)
+    print("Debug-Ordner erstellt:", debug_folder)
 
-    # ROI extrahieren
+    # ROI aus dem marked-Bild extrahieren
     roi_params = extract_roi_from_marked(marked, margin)
     if roi_params is None:
-        print(f"Keine rote Markierung in {folder_path}")
+        print("Keine rote Markierung im marked-Bild gefunden in", folder_path)
         return None, None, None
     new_x, new_y, new_w, new_h, red_mask = roi_params
-    save_debug_image(debug_folder, 'marked_red_mask.png', red_mask)
+    save_debug_image(debug_folder, "marked_red_mask.png", red_mask)
     marked_bbox = marked.copy()
-    cv2.rectangle(marked_bbox, (new_x, new_y), (new_x+new_w, new_y+new_h), (0,255,0), 2)
-    save_debug_image(debug_folder, 'marked_with_bbox.png', marked_bbox)
+    cv2.rectangle(marked_bbox, (new_x, new_y), (new_x + new_w, new_y + new_h), (0, 255, 0), 2)
+    save_debug_image(debug_folder, "marked_with_bbox.png", marked_bbox)
 
-    # ROIs zuschneiden
-    roi_prev = prev[new_y:new_y+new_h, new_x:new_x+new_w]
-    roi_curr = curr[new_y:new_y+new_h, new_x:new_x+new_w]
-    save_debug_image(debug_folder, 'roi_prev.png', roi_prev)
-    save_debug_image(debug_folder, 'roi_curr.png', roi_curr)
+    # ROI aus previous und current ausschneiden
+    roi_prev = prev[new_y:new_y + new_h, new_x:new_x + new_w]
+    roi_curr = curr[new_y:new_y + new_h, new_x:new_x + new_w]
+    save_debug_image(debug_folder, "roi_prev.png", roi_prev)
+    save_debug_image(debug_folder, "roi_curr.png", roi_curr)
 
-    # Segmentierung
+    # Segmentierung mittels THRESH_BINARY_INV
     thresh_prev = threshold_particle(roi_prev)
     thresh_curr = threshold_particle(roi_curr)
-    save_debug_image(debug_folder, 'thresh_prev.png', thresh_prev)
-    save_debug_image(debug_folder, 'thresh_curr.png', thresh_curr)
+    save_debug_image(debug_folder, "thresh_prev.png", thresh_prev)
+    save_debug_image(debug_folder, "thresh_curr.png", thresh_curr)
 
-    # Differenz und Wahrscheinlichkeit
-    diff, diff_clean, diff_area, probability = compute_difference_probability(
-        thresh_prev, thresh_curr,
-        noise_kernel_size=noise_kernel_size,
-        noise_iterations=noise_iterations,
-        area_threshold=area_threshold
-    )
-    save_debug_image(debug_folder, 'diff.png', diff)
-    save_debug_image(debug_folder, 'diff_clean.png', diff_clean)
-    print(f"Differenzfläche: {diff_area}, Detachment Probability: {probability}")
+    # Differenzbild aus den binären Bildern
+    diff, diff_clean, diff_area, probability = compute_difference_probability(thresh_prev, thresh_curr,
+                                                                              noise_kernel_size, noise_iterations)
+    save_debug_image(debug_folder, "diff.png", diff)
+    save_debug_image(debug_folder, "diff_clean.png", diff_clean)
+    print("Differenzfläche:", diff_area, "ROI-Fläche:", thresh_prev.shape[0] * thresh_prev.shape[1])
+    print("Detachment Probability (diff_area/ROI_area):", probability)
+
+    # Optional: Nur als Detektion werten, wenn diff_area größer als ein Mindestwert ist
+    if diff_area < area_threshold:
+        probability = 0.0
+        print("Diff area unter Schwellwert, keine Detektion.")
 
     return probability, diff_area, debug_folder
 
 
 def main():
+    # Tkinter-Fenster zur Auswahl des Hauptordners
     root = tk.Tk()
     root.withdraw()
 
@@ -178,20 +174,30 @@ def main():
         messagebox.showwarning("Abbruch", "Kein Ordner ausgewählt.")
         return
 
-    margin = simpledialog.askinteger("Parameter", "Erweiterungsrand (Pixel, Standard: 20):", initialvalue=20, parent=root) or 20
-    area_threshold = simpledialog.askinteger("Parameter", "Mindestdiff-Fläche (Pixel, Standard: 20):", initialvalue=20, parent=root) or 20
+    # Optional: Parameter abfragen
+    margin = simpledialog.askinteger("Parameter", "Erweiterungsrand (Pixel, Standard: 20):", initialvalue=20,
+                                     parent=root)
+    if margin is None:
+        margin = 20
+    # Parameter für Rauschunterdrückung
+    noise_kernel_size = (3, 3)
+    noise_iterations = 2
+    # Mindestfläche für Diff (um kleine Verschiebungen auszuschließen)
+    area_threshold = simpledialog.askinteger("Parameter", "Mindestdiff-Fläche (Pixel, Standard: 20):", initialvalue=20,
+                                             parent=root)
+    if area_threshold is None:
+        area_threshold = 20
 
-    output_excel = filedialog.asksaveasfilename(
-        title="Excel-Datei speichern unter", defaultextension=".xlsx",
-        filetypes=[("Excel files", "*.xlsx")],
-        initialfile="detachment_results.xlsx"
-    )
+    output_excel = filedialog.asksaveasfilename(title="Excel-Datei speichern unter", defaultextension=".xlsx",
+                                                filetypes=[("Excel files", "*.xlsx")],
+                                                initialfile="detachment_results.xlsx")
     if not output_excel:
         messagebox.showwarning("Abbruch", "Kein Speicherort für Excel ausgewählt.")
         return
 
     particle_folders = [os.path.join(input_dir, d) for d in os.listdir(input_dir)
                         if os.path.isdir(os.path.join(input_dir, d)) and d.startswith("Particle_")]
+
     if not particle_folders:
         messagebox.showinfo("Info", "Keine Particle-Unterordner gefunden.")
         return
@@ -199,20 +205,20 @@ def main():
     results = []
     for folder in particle_folders:
         print("Verarbeite:", folder)
-        probability, diff_area, _ = process_particle_folder(
-            folder, margin,
-            noise_kernel_size=(3,3), noise_iterations=2,
-            area_threshold=area_threshold
-        )
-        if probability is not None:
-            results.append({"Ordner": os.path.basename(folder),
-                             "Detachment_Probability": probability,
-                             "Differenz_Flaeche": diff_area})
+        res = process_particle_folder(folder, margin, noise_kernel_size, noise_iterations, area_threshold)
+        if res[0] is not None:
+            probability, diff_area, debug_folder = res
+            folder_name = os.path.basename(folder)
+            results.append({
+                "Ordner": folder_name,
+                "Detachment_Probability": probability,
+                "Differenz_Flaeche": diff_area
+            })
 
     df = pd.DataFrame(results)
     df.to_excel(output_excel, index=False)
     messagebox.showinfo("Ergebnis", f"Ergebnisse wurden in {output_excel} gespeichert.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
